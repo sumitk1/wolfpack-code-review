@@ -10,9 +10,9 @@ to the change, not the whole repo.
    `git worktree add --detach <scratchpad>/wolf/pr<N> <headRefOid>`.
 3. Build the review packet (SKILL.md Playbook §3): PR metadata + full diff
    (exclude generated giants — lockfiles, generated schemas — naming them in the
-   packet) + **verified experiments** (build/test the change at head NOW; the
-   highest-value part) + known/accepted items so the panel doesn't re-raise
-   filed issues as discoveries.
+   packet) + **verified experiments** (build/test the change at head NOW — in a
+   sandbox if the author is untrusted; the highest-value part) + known/accepted
+   items so the panel doesn't re-raise filed issues as discoveries.
 
 ## Panel size (by diff size, generated files excluded from the count)
 | Changed lines | Reviewers | Skeptics |
@@ -29,7 +29,9 @@ profiles; for a full panel, push the `correctness-b` / `security-b` entries
 
 ## Reviewer content
 Point each reviewer at the packet path + the worktree path. They may read/grep
-and run read-only shell (`git show`, run the package's tests) to verify.
+and run shell to verify (`git show`, run the package's tests) — noting that
+running tests executes the PR's code; see SKILL.md's Tuning caveat for
+untrusted authors.
 
 ## Output format → `<scratchpad>/wolf/out/review-<pr>.md`
 ```markdown

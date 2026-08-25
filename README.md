@@ -99,12 +99,14 @@ scripts/build_packet.py     per-target prep: pull-ref fetch (works on open,
                             args-<batch>.json
 scripts/wolftools.py        Stage-4 tooling: split / table / report / post
 scripts/post_review.py      standalone line-anchored review poster
+tests/test_parsers.py       regression tests for the diff/anchor/packet parsers
 ```
 
 `scripts/` is meant to be **copied into a per-batch scratch directory** —
 `build_packet.py` and `wolftools.py` write worktrees, packets, and findings
 next to themselves, not into your repo. Edit `CLONES` / `GLOBAL_KNOWN` in
-`build_packet.py` for your repos.
+`build_packet.py` for your repos (or set `WOLF_CLONE=<path>` — the environment
+variable wins over `CLONES`).
 
 ## Cautions
 
@@ -112,10 +114,14 @@ next to themselves, not into your repo. Edit `CLONES` / `GLOBAL_KNOWN` in
   Don't run it over files containing live credentials or data you can't send
   to the Claude API.
 - **Reviewed content is untrusted input.** A hostile diff could try to steer
-  reviewers ("ignore your instructions…"). Reviewers and skeptics are
-  read-only and their output is schema-constrained, which bounds the blast
-  radius — but adjudicate Stage 4 yourself and treat any finding that quotes
-  instructions from the diff with suspicion.
+  reviewers ("ignore your instructions…"). Reviewer output is schema-constrained
+  and Stage 4 is human-adjudicated, which limits prompt injection — but
+  "read-only" constrains the agents' tool calls, not code the PR itself runs:
+  **building or testing an untrusted PR executes its code** with your ambient
+  credentials, and `build_packet.py` worktrees share `.git` (hooks/config) with
+  your clone. Sandbox test-runs for untrusted authors, adjudicate Stage 4
+  yourself, and treat any finding that quotes instructions from the diff with
+  suspicion.
 - **Skeptics dominate wall-clock.** An xhigh skeptic on a 10+-finding docket
   can grind for 20–40 minutes; that's working, not hung. The docket caps in
   the profiles exist to keep each call short — see the straggler doctrine in

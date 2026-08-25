@@ -7,8 +7,8 @@ adjudication.json: { "<key>": {"verdict": "...", "final": {"F1":"HIGH"|"MEDIUM"|
 """
 import json, re, subprocess, sys, os
 RV = os.path.dirname(os.path.abspath(__file__))
-OUT = os.path.join(RV, "out"); os.makedirs(OUT, exist_ok=True)
-NLENS = 7
+OUT = os.path.join(RV, "out")
+NLENS = 7  # fallback lens count when a findings file predates lensVerdicts
 
 def load_args(batch):
     return {a["key"]: a for a in json.load(open(f"{RV}/args-{batch}.json"))}
@@ -49,14 +49,24 @@ def table(batch):
             print(f"      votes={[f'{a}:{b}' for a,b,_ in v.get(c['id'], [])]}")
 
 def report(batch, adj_file):
+    os.makedirs(OUT, exist_ok=True)
     ADJ = json.load(open(adj_file)); args = load_args(batch)
     for k, a in ADJ.items():
         if k not in args: continue
+        bad = {i: v for i, v in a["final"].items() if v not in ("HIGH", "MEDIUM", "LOW", "DISMISSED")}
+        if bad: sys.exit(f"{k}: invalid adjudication values {bad} (use HIGH|MEDIUM|LOW|DISMISSED)")
         d = json.load(open(f"{RV}/findings-{k}.json")); t = args[k]
         clusters = {c["id"]: c for c in d["clusters"]}; votes = votes_for(d["skeptics"])
+        # describe the run that actually happened, not the configured plan
+        nlens = len(d.get("lensVerdicts") or []) or NLENS
+        quorum = d.get("quorum", len(d.get("skeptics") or []) or 3)
+        deg = ""
+        if d.get("gaps"): deg += f" Degraded run — no findings from: {', '.join(d['gaps'])}."
+        if any(s.get("dockets_done", 1) < s.get("dockets_total", 1) for s in d.get("skeptics") or []):
+            deg += " Some skeptic dockets did not complete."
         vstr = lambda i: "; ".join(f"{nm} {tag}" for nm, tag, _ in votes.get(i, []))
         L = [f"# Wolfpack Review — {t['repo']}#{t['pr']}",
-             f"_Panel: {a.get('panel', PANEL_DESC.get(d.get('profile', 'standard'), PANEL_DESC['standard']))}. Mode: pr-review. Head: `{open(f'{RV}/sha-{k}').read().strip()[:10]}`. Every finding below survived an adversarial skeptic pass; kill rule = {KILL_DESC.get(d.get('quorum', 3), KILL_DESC[3])} (a \"can't find it\" REJECT is void)._",
+             f"_Panel: {a.get('panel', PANEL_DESC.get(d.get('profile', 'standard'), PANEL_DESC['standard']))} ({nlens} lenses returned). Mode: pr-review. Head: `{open(f'{RV}/sha-{k}').read().strip()[:10]}`. Every finding below survived an adversarial skeptic pass; kill rule = {KILL_DESC.get(quorum, f'{quorum}-vote quorum (degraded run)')} (a \"can't find it\" REJECT is void).{deg}_",
              "", "## Verdict", a["verdict"], ""]
         for bucket, prefix in (("HIGH", "H"), ("MEDIUM", "M")):
             ids = sorted([i for i in clusters if a["final"].get(i) == bucket], key=lambda i: (-clusters[i]["signal_strength"], int(re.sub(r"\D", "", i) or 0)))
@@ -64,7 +74,7 @@ def report(batch, adj_file):
             if not ids: L.append("_None._")
             for n, i in enumerate(ids, 1):
                 c = clusters[i]
-                L += [f"### {prefix}{n} ({i}) — {c['title']}", f"`{c['location']}` _(signal {c['signal_strength']}/{NLENS}; skeptics: {vstr(i)})_", c["rationale"].strip(), f"**Fix:** {c['recommendation'].strip()}"]
+                L += [f"### {prefix}{n} ({i}) — {c['title']}", f"`{c['location']}` _(signal {c['signal_strength']}/{nlens}; skeptics: {vstr(i)})_", c["rationale"].strip(), f"**Fix:** {c['recommendation'].strip()}"]
                 if i in a.get("note", {}): L.append(f"> **Orchestrator:** {a['note'][i]}")
                 L.append("")
             L.append("")
@@ -91,10 +101,12 @@ def report(batch, adj_file):
             if sev not in ("HIGH", "MEDIUM"): continue
             placed = None
             for path, lo, hi in anchors(c["location"]):
-                vl = valid.get(path) or valid.get(path.lstrip("./"))
-                if not vl: continue
-                cand = [l for l in range(lo, hi + 1) if l in vl]
-                if cand: placed = (path, cand[0]); break
+                for p in (path, path.lstrip("./")):  # emit the normalized form that matched, or GitHub rejects the review
+                    vl = valid.get(p)
+                    if not vl: continue
+                    cand = [l for l in range(lo, hi + 1) if l in vl]
+                    if cand: placed = (p, cand[0]); break
+                if placed: break
             if not placed: skipped.append((i, c["location"])); continue
             body = f"**[wolfpack] {sev} — {i}: {c['title']}**\n\n{c['rationale'].strip()}\n\n**Fix:** {c['recommendation'].strip()}"
             if i in a.get("note", {}): body += f"\n\n_Orchestrator: {a['note'][i]}_"
@@ -109,17 +121,18 @@ def right_lines(patch):
     not inflate the set, or an inline comment could anchor to a line the GitHub
     API rejects (which voids the whole review)."""
     out = {}; path = None; new = None
-    for ln in open(patch, encoding="utf-8", errors="replace"):
-        if ln.startswith("diff --git"):
-            path = None; new = None; continue
-        if ln.startswith("+++ ") and new is None:  # header only outside hunks: an added '++ x' line is '+++ x' inside one
-            p = ln[4:].strip(); path = p[2:] if p.startswith("b/") else p; out.setdefault(path, set()); continue
-        m = re.match(r"@@ -\d+(?:,\d+)? \+(\d+)(?:,\d+)? @@", ln)
-        if m: new = int(m.group(1)); continue
-        if new is None or path is None: continue
-        if ln.startswith("+"): out[path].add(new); new += 1
-        elif ln.startswith("-") or ln.startswith("\\"): pass
-        else: out[path].add(new); new += 1
+    with open(patch, encoding="utf-8", errors="replace") as fh:
+        for ln in fh:
+            if ln.startswith("diff --git"):
+                path = None; new = None; continue
+            if ln.startswith("+++ ") and new is None:  # header only outside hunks: an added '++ x' line is '+++ x' inside one
+                p = ln[4:].strip(); path = p[2:] if p.startswith("b/") else p; out.setdefault(path, set()); continue
+            m = re.match(r"@@ -\d+(?:,\d+)? \+(\d+)(?:,\d+)? @@", ln)
+            if m: new = int(m.group(1)); continue
+            if new is None or path is None: continue
+            if ln.startswith("+"): out[path].add(new); new += 1
+            elif ln.startswith("-") or ln.startswith("\\"): pass
+            else: out[path].add(new); new += 1
     return out
 
 LOC = re.compile(r"([A-Za-z0-9_./-]+\.[A-Za-z0-9]+|\.dockerignore|\.gitignore|\.env\.example|Dockerfile|Makefile):(\d+)(?:[-–](\d+))?")
@@ -127,6 +140,7 @@ def anchors(loc):
     for m in LOC.finditer(loc): yield m.group(1), int(m.group(2)), int(m.group(3) or m.group(2))
 
 def post(batch, k, dry=False):
+    os.makedirs(OUT, exist_ok=True)
     t = load_args(batch)[k]; sha = open(f"{RV}/sha-{k}").read().strip()
     payload = {"commit_id": sha, "event": "COMMENT", "body": open(f"{OUT}/review-{k}.md").read(), "comments": json.load(open(f"{OUT}/inline-{k}.json"))}
     p = f"{OUT}/payload-{k}.json"; json.dump(payload, open(p, "w"))
@@ -137,6 +151,9 @@ def post(batch, k, dry=False):
     if r.returncode: sys.exit(r.returncode)  # a rejected review (e.g. 422 bad anchor) must not exit 0
 
 if __name__ == "__main__":
+    NEED = {"split": 4, "table": 3, "report": 4, "post": 4}  # min len(sys.argv) per command
+    if len(sys.argv) < 2 or sys.argv[1] not in NEED or len(sys.argv) < NEED[sys.argv[1]]:
+        sys.exit(__doc__)
     cmd = sys.argv[1]
     if cmd == "split": split(sys.argv[2], sys.argv[3])
     elif cmd == "table": table(sys.argv[2])

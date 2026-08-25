@@ -146,7 +146,8 @@ Prefer one or two targets per workflow so an interrupt is cheap.
 3. **Build the shared review packet** (one file all reviewers read): target
    metadata, the full diff in a ```diff fence (exclude generated giants —
    lockfiles, generated schemas — with a note naming them), **verified
-   experiments** (run the tests/build NOW at the head SHA; a verified
+   experiments** (run the tests/build NOW at the head SHA — sandboxed if the
+   author is untrusted, since building/testing a PR executes its code; a verified
    "bad input → bad output" table beats speculation), and a **known/accepted
    items** list (already-filed issues, deliberate scope cuts) so the panel
    doesn't re-raise them as discoveries.
@@ -181,9 +182,14 @@ Prefer one or two targets per workflow so an interrupt is cheap.
 - Change lenses/tiers/efforts by editing the tables in `references/contracts.md`
   — it is the single source of truth for the panel.
 - Cost scales with elite/max lenses; `sonnet`/`haiku` lenses are the cheap ones.
-- Reviewers and skeptics are **read-only**: they may read/grep/run read-only
-  shell (`git show`, builds, tests in a scratch venv) but never modify files.
-  Fixes are a separate step by the main agent after the human picks findings.
+- Reviewers and skeptics are **read-only by instruction**: they may read/grep/
+  run shell to verify (`git show`, builds, tests in a scratch venv) but never
+  modify files. Caveat: that constrains the agents' own tool calls, NOT code the
+  PR's build/tests execute — running an untrusted PR's tests is arbitrary code
+  execution with your ambient credentials, and `build_packet.py` worktrees share
+  `.git` (hooks/config) with your clone. Sandbox or skip test-runs for untrusted
+  authors. Fixes are a separate step by the main agent after the human picks
+  findings.
 
 ## Files
 
@@ -197,6 +203,7 @@ Prefer one or two targets per workflow so an interrupt is cheap.
   (standard | economy | frugal), `alt` model swap, skeptic dockets; targets via `args`.
 - `scripts/build_packet.py` — per-target prep + packet: pull-ref fetch (open,
   closed and merged PRs), detached worktree, diff/body, known-items list,
-  `--profile`, upserts `args-<batch>.json`. Edit `CLONES`/`GLOBAL_KNOWN` per repo.
+  `--profile`, upserts `args-<batch>.json`. Edit `CLONES`/`GLOBAL_KNOWN` per
+  repo, or set `WOLF_CLONE=<path>` to point at a clone without editing.
 - `scripts/wolftools.py` — `split` a workflow output into per-target findings,
   `table`, `report` (profile/quorum-aware footer), `post` (COMMENT review).

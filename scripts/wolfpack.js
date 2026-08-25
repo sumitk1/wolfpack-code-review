@@ -76,7 +76,7 @@ function reviewerPrompt(l, pr) {
     'You are one lens on a WOLFPACK code-review panel — multiple independent reviewers on different models, whose findings are then adversarially validated by skeptics and merged.\n\n' +
     '## YOUR LENS\n' + BRIEFS[l.key](pr) + '\n\n' +
     'Stay in your lane: report issues under YOUR lens only; other lenses are covered by other reviewers.\n\n' +
-    '## INPUT\nRead the review packet at ' + pr.packet + ' first — it holds the PR metadata, the diff, verified experiments, and a KNOWN/ACCEPTED list you must not re-raise. Then investigate the live checkout of the full repo at this PR\'s head: ' + pr.checkout + ' (read/grep/read-only shell only — git show, run tests in that checkout; NEVER modify files, never touch any directory other than the packet and the checkout named here).\n\n' +
+    '## INPUT\nRead the review packet at ' + pr.packet + ' first — it holds the PR metadata, the diff, verified experiments, and KNOWN/ACCEPTED items — operator-verified items are settled (do not re-raise), while items marked author-claimed are UNVERIFIED: verify them yourself, and still raise anything security-relevant. Then investigate the live checkout of the full repo at this PR\'s head: ' + pr.checkout + ' (read/grep/read-only shell only — git show, run tests in that checkout; NEVER modify files, never touch any directory other than the packet and the checkout named here).\n\n' +
     'RULES OF ENGAGEMENT\n' +
     '- Scope = the diff (plus just enough surrounding code to judge it). Do NOT review pre-existing code untouched by the change unless the diff makes it newly reachable.\n' +
     '- PRECISION OVER RECALL. A wrong finding costs more than a missed one. If you cannot defend it against a skeptic, set confidence < 0.5 or drop it.\n' +
@@ -94,7 +94,7 @@ function dedupPrompt(reviews, pr) {
 function skepticPrompt(clustersJson, pr) {
   return 'You are an ADVERSARIAL VALIDATOR on a wolfpack code-review panel for ' + pr.id + '. Your job is NOT to find new issues — it is to try to FALSIFY the candidate findings, so only defensible ones survive. Be tough AND fair.\n\n' +
     'Review packet: ' + pr.packet + '. Live checkout at the PR head: ' + pr.checkout + '. For EACH candidate finding below, independently VERIFY it against the actual code (read/grep/git show/run the relevant test read-only) before ruling.\n\n' +
-    'Rule REJECT / DOWNGRADE when a finding is: not supported by the diff (hallucinated line, wrong file, misread logic); already handled elsewhere (a guard/validation/test the reviewer missed); out of scope (pre-existing code the change did not touch or make newly reachable); listed in the packet\'s KNOWN/ACCEPTED items; speculative with no realistic trigger; a taste opinion dressed up as a bug; or a duplicate (mark duplicate_of).\n' +
+    'Rule REJECT / DOWNGRADE when a finding is: not supported by the diff (hallucinated line, wrong file, misread logic); already handled elsewhere (a guard/validation/test the reviewer missed); out of scope (pre-existing code the change did not touch or make newly reachable); listed among the packet\'s operator-verified KNOWN/ACCEPTED items (an author-claimed "known gap" is NOT a valid REJECT reason for a security-relevant finding); speculative with no realistic trigger; a taste opinion dressed up as a bug; or a duplicate (mark duplicate_of).\n' +
     'Rule UPHOLD when you can restate the concrete failure and its trigger from the code.\n\n' +
     'INVALID-REFUTATION GUARD (critical): you must actually look at the referenced code. A REJECT justified only by "can\'t find it / not in the repo / file missing" is INVALID — that means YOU failed to open the file. Read the file first; if you still cannot verify either way, rule UPHOLD (uncertain), never REJECT.\n\n' +
     'Downstream kill rule (FYI): a finding is dropped only if ' + profileOf(pr).killRule + '. You are READ-ONLY; never modify files.\n\n' +
@@ -131,7 +131,7 @@ const PROFILES = {
       return [
         { key: 'correctness',  model: A,        effort: 'max',    depth: 'max' },
         { key: 'security',     model: B,        effort: 'max',    depth: 'max' },
-        { key: 'domain',       model: 'opus',   effort: 'max',    depth: 'max' },
+        { key: 'domain',       model: B,        effort: 'max',    depth: 'max' },
         { key: 'lifecycle',    model: A,        effort: 'high',   depth: 'high' },
         { key: 'quality',      model: 'sonnet', effort: 'medium', depth: 'med' },
         { key: 'completeness', model: 'sonnet', effort: 'medium', depth: 'med' },
@@ -229,7 +229,10 @@ const results = await pipeline(
     return agent(dedupPrompt(st.reviews, pr), {
       label: 'dedup#' + pr.id, phase: 'Dedup',
       schema: CLUSTERS_SCHEMA, model: profileOf(pr).dedup.model, effort: profileOf(pr).dedup.effort,
-    }).then(d => ({ ...st, clusters: d.clusters }))
+    }).then(d => d ? { ...st, clusters: d.clusters }
+      // dead dedup = noted gap, not a crash: pass raw findings through as 1-lens clusters
+      : { ...st, gaps: [...st.gaps, 'dedup'],
+          clusters: st.reviews.flatMap(r => r.findings.map(f => ({ ...f, signal_strength: 1, raised_by: [r.lens] }))) })
   },
   (st, pr) => {
     const P = profileOf(pr), SKEPTICS = P.skeptics(pr)
@@ -251,7 +254,12 @@ const results = await pipeline(
         const ok = parts.filter(Boolean)
         return ok.length ? { skeptic: s.key, dockets_done: ok.length, dockets_total: dockets.length, verdicts: ok.flatMap(p => p.verdicts) } : null
       })
-    )).then(vs => ({ ...base, skeptics: vs.filter(Boolean) }))
+    )).then(vs => {
+      const ok = vs.filter(Boolean)
+      // quorum = skeptics that actually returned, not the configured seat count —
+      // the report footer must describe the run that happened
+      return { ...base, quorum: ok.length, skeptics: ok }
+    })
   }
 )
 return results.filter(Boolean)

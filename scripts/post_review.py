@@ -4,7 +4,8 @@ Reusable inline-PR-review poster for the wolfpack panel.
 
 Posts a single review (default event=COMMENT so it never overrides existing
 approvals) with a markdown summary + line-anchored inline comments, via the
-GitHub reviews API. Works on GitHub Enterprise (edit GH_HOST below).
+GitHub reviews API. Works on GitHub Enterprise (set the GH_HOST environment
+variable — it wins — or edit the GH_HOST constant below).
 
 Inline comments can ONLY attach to lines that appear in the PR diff (added or
 context lines). If HEAD == PR head SHA, file line numbers == diff line numbers.
@@ -24,7 +25,7 @@ import sys
 import tempfile
 
 # ---- configure per PR --------------------------------------------------------
-GH_HOST = "github.com"
+GH_HOST = os.environ.get("GH_HOST") or "github.com"  # env wins, matching pr-review.md's GH_HOST=<host> convention
 REPO = "OWNER/REPO"                            # e.g. your-org/your-repo
 PR = 0
 COMMIT = "<pr head sha>"                       # must match git rev-parse HEAD
@@ -54,7 +55,7 @@ def post(payload):
     with tempfile.NamedTemporaryFile("w", suffix=".json", delete=False) as f:
         json.dump(payload, f, indent=2)
         payload_path = f.name
-    env = {**os.environ, "GH_HOST": GH_HOST}   # the constant above wins over the environment
+    env = {**os.environ, "GH_HOST": GH_HOST}   # resolved above: env value if set, else the constant
     out = subprocess.run(
         ["gh", "api", "--method", "POST",
          f"/repos/{REPO}/pulls/{PR}/reviews", "--input", payload_path],

@@ -309,15 +309,21 @@ const results = await pipeline(
   (st, pr) => agent(dedupPrompt(st.reviews, pr), {
     label: `dedup#${pr.id}`, phase: 'Dedup',
     schema: CLUSTERS_SCHEMA, model: 'sonnet', effort: 'medium',
-  }).then(d => ({ ...st, clusters: d.clusters })),
+  }).then(d => d ? { ...st, clusters: d.clusters }
+    // dead dedup = noted gap, not a crash: raw findings pass through as 1-lens clusters
+    : { ...st, gaps: [...st.gaps, 'dedup'],
+        clusters: st.reviews.flatMap(r => r.findings.map(f => ({ ...f, signal_strength: 1, raised_by: [r.lens] }))) }),
   (st, pr) => parallel(SKEPTICS.map(s => () =>
     agent(skepticPrompt(JSON.stringify(st.clusters), pr), {
       label: `${s.key}#${pr.id}`, phase: 'Precision',
       schema: VERDICTS_SCHEMA, model: s.model, effort: s.effort,
     }).then(v => v && { skeptic: s.key, verdicts: v.verdicts })
-  )).then(vs => ({ pr: pr.id, profile: 'standard', quorum: SKEPTICS.length,
-                   lensVerdicts: st.reviews.map(r => ({ lens: r.lens, verdict: r.verdict })),
-                   gaps: st.gaps, clusters: st.clusters, skeptics: vs.filter(Boolean) }))
+  )).then(vs => {
+    const ok = vs.filter(Boolean)             // quorum = skeptics that returned, so the footer reports the real run
+    return { pr: pr.id, profile: 'standard', quorum: ok.length,
+             lensVerdicts: st.reviews.map(r => ({ lens: r.lens, verdict: r.verdict })),
+             gaps: st.gaps, clusters: st.clusters, skeptics: ok }
+  })
 )
 return results
 ```
