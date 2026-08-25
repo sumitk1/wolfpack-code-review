@@ -1,0 +1,14 @@
+# Python
+__pycache__/
+*.pyc
+
+# Run artifacts (scripts are normally copied to a scratch dir, but just in case)
+scripts/out/
+scripts/args-*.json
+scripts/packet-*.md
+scripts/diff-*.patch
+scripts/body-*.md
+scripts/sha-*
+scripts/findings-*.json
+scripts/keys-*.json
+scripts/experiments-*.log
