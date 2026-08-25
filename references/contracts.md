@@ -253,8 +253,17 @@ economy/frugal seats substitute the matching column of the profile table (or
 use `scripts/wolfpack.js`, whose `PROFILES` map carries all three and switches
 per target).
 
-Adapt paths/lenses per run; pass targets via `args`:
-`args = [{ id: '58', packet: '/abs/packet-58.md', checkout: '/abs/wolf/pr58', stack: 'Python/FastAPI/...' }, ...]`
+Adapt paths/lenses per run; pass targets via `args`. The fields the Workflow
+script itself reads are `id`, `packet`, `checkout`, `stack` (+ `alt`, `profile`
+in `scripts/wolfpack.js`) — but the Stage-4 tooling (`wolftools.py`) also needs
+`key`, `repo`, and `pr` on each target, so use the full shape
+`scripts/build_packet.py` emits:
+
+```js
+args = [{ id: 'myrepo#58', key: 'pr58', repo: 'my-org/myrepo', pr: 58,
+          packet: '/abs/packet-pr58.md', checkout: '/abs/wolf/pr58',
+          stack: 'Python/FastAPI/...', alt: false, profile: 'standard' }, ...]
+```
 
 ```js
 export const meta = {
@@ -290,24 +299,31 @@ const results = await pipeline(
   args,
   pr => parallel(LENSES.map(l => () =>
     agent(reviewerPrompt(l, pr), {
-      label: `${l.key}#${pr.id}`, phase: `PR #${pr.id}`,
+      label: `${l.key}#${pr.id}`, phase: 'Breadth',
       schema: FINDINGS_SCHEMA, model: l.model, effort: l.effort,
     })
-  )).then(rs => rs.filter(Boolean)),            // a dead lens = a noted gap, never a blocker
-  (reviews, pr) => agent(dedupPrompt(reviews, pr), {
-    label: `dedup#${pr.id}`, phase: `PR #${pr.id}`,
+  )).then(rs => ({                              // a dead lens = a noted gap, never a blocker
+    reviews: rs.map((r, i) => r ? { lens: LENSES[i].key, verdict: r.verdict, findings: r.findings } : null).filter(Boolean),
+    gaps: rs.map((r, i) => r ? null : LENSES[i].key).filter(Boolean),
+  })),
+  (st, pr) => agent(dedupPrompt(st.reviews, pr), {
+    label: `dedup#${pr.id}`, phase: 'Dedup',
     schema: CLUSTERS_SCHEMA, model: 'sonnet', effort: 'medium',
-  }).then(d => ({ reviews, clusters: d.clusters })),
+  }).then(d => ({ ...st, clusters: d.clusters })),
   (st, pr) => parallel(SKEPTICS.map(s => () =>
     agent(skepticPrompt(JSON.stringify(st.clusters), pr), {
-      label: `${s.key}#${pr.id}`, phase: `PR #${pr.id}`,
+      label: `${s.key}#${pr.id}`, phase: 'Precision',
       schema: VERDICTS_SCHEMA, model: s.model, effort: s.effort,
-    })
-  )).then(vs => ({ pr: pr.id, lensVerdicts: st.reviews.map(r => ({ lens: r.lens, verdict: r.verdict })),
-                   clusters: st.clusters, skeptics: vs.filter(Boolean) }))
+    }).then(v => v && { skeptic: s.key, verdicts: v.verdicts })
+  )).then(vs => ({ pr: pr.id, profile: 'standard', quorum: SKEPTICS.length,
+                   lensVerdicts: st.reviews.map(r => ({ lens: r.lens, verdict: r.verdict })),
+                   gaps: st.gaps, clusters: st.clusters, skeptics: vs.filter(Boolean) }))
 )
 return results
 ```
+
+(This output shape — `skeptic`-keyed verdicts plus `gaps`/`profile`/`quorum` —
+is what `scripts/wolftools.py` consumes; keep it if you adapt the template.)
 
 Dedup prompt core: "Cluster these raw panel findings into stable ids F1..Fn.
 Merge findings that describe the same underlying defect even if worded

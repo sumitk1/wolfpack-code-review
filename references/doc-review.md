@@ -53,3 +53,6 @@ _Panel: N reviewers across M Claude models + 3 skeptics (adversarial pass). Mode
 | High | significant gap/risk; material problems if unaddressed |
 | Medium | noteworthy gap; degrades quality/reliability |
 | Low | minor omission/polish |
+
+The panel schemas only carry HIGH/MEDIUM/LOW; **Critical is assigned by the
+orchestrator at Stage 4** by promoting the HIGHs that meet the criteria above.

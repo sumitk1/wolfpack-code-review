@@ -112,7 +112,7 @@ def right_lines(patch):
     for ln in open(patch, encoding="utf-8", errors="replace"):
         if ln.startswith("diff --git"):
             path = None; new = None; continue
-        if ln.startswith("+++ "):
+        if ln.startswith("+++ ") and new is None:  # header only outside hunks: an added '++ x' line is '+++ x' inside one
             p = ln[4:].strip(); path = p[2:] if p.startswith("b/") else p; out.setdefault(path, set()); continue
         m = re.match(r"@@ -\d+(?:,\d+)? \+(\d+)(?:,\d+)? @@", ln)
         if m: new = int(m.group(1)); continue
@@ -134,6 +134,7 @@ def post(batch, k, dry=False):
     if dry: return
     r = subprocess.run(["gh", "api", "--method", "POST", f"/repos/{t['repo']}/pulls/{t['pr']}/reviews", "--input", p, "--jq", '"posted review id=\\(.id) state=\\(.state) url=\\(.html_url)"'], capture_output=True, text=True)
     print(r.stdout.strip() or r.stderr.strip()[:500])
+    if r.returncode: sys.exit(r.returncode)  # a rejected review (e.g. 422 bad anchor) must not exit 0
 
 if __name__ == "__main__":
     cmd = sys.argv[1]

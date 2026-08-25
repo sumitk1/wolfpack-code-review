@@ -23,7 +23,9 @@ to the change, not the whole repo.
 
 Default lean lens set: correctness, security, domain, lifecycle, quality,
 completeness, anti-pattern. Full adds the `-b` cross-checks on the other elite
-model.
+model. Note: `scripts/wolfpack.js` ships the 7-lens lean panel in all
+profiles; for a full panel, push the `correctness-b` / `security-b` entries
+(briefs already in its `BRIEFS` map) onto that target's lens list.
 
 ## Reviewer content
 Point each reviewer at the packet path + the worktree path. They may read/grep

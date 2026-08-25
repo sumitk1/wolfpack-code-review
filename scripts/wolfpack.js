@@ -22,6 +22,10 @@ const BRIEFS = {
   quality: () => 'CODE QUALITY & DESIGN. Judge against DRY, YAGNI, SOLID, and the Zen of Python. Hunt: duplication/magic literals that can drift, leaky abstractions, poor naming, dead code, over-engineering, functions/files too big, comments that lie. Prefer a few high-signal findings over a laundry list of nits.',
   completeness: () => 'COMPLETENESS. Hunt: missing test coverage (esp. for the exact edge cases this change adds), untested defensive branches, missing docs updates, config added but not wired to every path, version bumps forgotten, and mismatches between what the PR description/design doc promises and what the diff actually delivers.',
   antipattern: () => 'ANTI-PATTERNS & FOOTGUNS. Hunt: silent failure, catch-and-ignore, hidden side effects, surprising defaults, values that render fine but explode at runtime, copy-paste drift, "temporary" hacks, and platform-specific anti-patterns for the stack in the diff.',
+  // Full-panel cross-checks (>~500 changed lines): push these onto the standard
+  // lens list on the OTHER elite model than their primary (see contracts.md).
+  'correctness-b': () => 'LOGIC & CORRECTNESS, independent cross-check. Reason from scratch — do not assume the obvious bug is the only bug. Especially probe template/config rendering, shell quoting/expansion, and verification checks whose PASS condition can be satisfied by a broken state.',
+  'security-b': () => 'SECURITY, independent cross-check on a different model. Focus extra on things that pass tests but fail or misbehave at deploy/runtime, and on whether elevated privileges are actually necessary or could be scoped down.',
 }
 
 
@@ -84,11 +88,11 @@ function reviewerPrompt(l, pr) {
 }
 
 function dedupPrompt(reviews, pr) {
-  return 'You are the DEDUP stage of a wolfpack review of PR #' + pr.id + '. Cluster these raw panel findings into stable ids F1..Fn. Merge findings that describe the same underlying defect even if worded differently or located a few lines apart. For each cluster: signal_strength = number of DISTINCT lenses that raised it; list them in raised_by; keep the clearest location, the strongest short rationale, the most concrete recommendation, and the HIGHEST severity claimed. Do NOT drop, judge, or add findings — clustering only.\n\nRAW FINDINGS (JSON):\n' + JSON.stringify(reviews)
+  return 'You are the DEDUP stage of a wolfpack review of ' + pr.id + '. Cluster these raw panel findings into stable ids F1..Fn. Merge findings that describe the same underlying defect even if worded differently or located a few lines apart. For each cluster: signal_strength = number of DISTINCT lenses that raised it; list them in raised_by; keep the clearest location, the strongest short rationale, the most concrete recommendation, and the HIGHEST severity claimed. Do NOT drop, judge, or add findings — clustering only.\n\nRAW FINDINGS (JSON):\n' + JSON.stringify(reviews)
 }
 
 function skepticPrompt(clustersJson, pr) {
-  return 'You are an ADVERSARIAL VALIDATOR on a wolfpack code-review panel for PR #' + pr.id + '. Your job is NOT to find new issues — it is to try to FALSIFY the candidate findings, so only defensible ones survive. Be tough AND fair.\n\n' +
+  return 'You are an ADVERSARIAL VALIDATOR on a wolfpack code-review panel for ' + pr.id + '. Your job is NOT to find new issues — it is to try to FALSIFY the candidate findings, so only defensible ones survive. Be tough AND fair.\n\n' +
     'Review packet: ' + pr.packet + '. Live checkout at the PR head: ' + pr.checkout + '. For EACH candidate finding below, independently VERIFY it against the actual code (read/grep/git show/run the relevant test read-only) before ruling.\n\n' +
     'Rule REJECT / DOWNGRADE when a finding is: not supported by the diff (hallucinated line, wrong file, misread logic); already handled elsewhere (a guard/validation/test the reviewer missed); out of scope (pre-existing code the change did not touch or make newly reachable); listed in the packet\'s KNOWN/ACCEPTED items; speculative with no realistic trigger; a taste opinion dressed up as a bug; or a duplicate (mark duplicate_of).\n' +
     'Rule UPHOLD when you can restate the concrete failure and its trigger from the code.\n\n' +
@@ -193,22 +197,21 @@ const PROFILES = {
   },
 }
 function profileOf(pr) {
-  const p = PROFILES[pr.profile || 'standard']
+  const p = PROFILES[pr.profile]
   if (!p) throw new Error('unknown panel profile "' + pr.profile + '" on target ' + pr.id + ' (use standard|economy|frugal)')
   return p
 }
-function lensesFor(pr) { return profileOf(pr).lenses(pr) }
-function skepticsFor(pr) { return profileOf(pr).skeptics(pr) }
 function chunk(xs, n) { const out = []; for (let i = 0; i < xs.length; i += n) out.push(xs.slice(i, i + n)); return out }
 
-args.forEach(profileOf)  // fail fast on a typo'd profile before any agent spends tokens
-const byProfile = args.reduce((m, pr) => { const k = pr.profile || 'standard'; m[k] = (m[k] || 0) + 1; return m }, {})
+// normalize once, then fail fast on a typo'd profile before any agent spends tokens
+args.forEach(pr => { pr.profile = pr.profile || 'standard'; profileOf(pr) })
+const byProfile = args.reduce((m, pr) => { m[pr.profile] = (m[pr.profile] || 0) + 1; return m }, {})
 log('Wolfpack: ' + args.length + ' targets (' + Object.entries(byProfile).map(([k, n]) => n + ' ' + k).join(', ') + ') x (7 lenses + dedup + skeptics, docketed) — a batch panel review is the requested scale')
 
 const results = await pipeline(
   args,
   pr => {
-    const LENSES = lensesFor(pr)
+    const LENSES = profileOf(pr).lenses(pr)
     return parallel(LENSES.map(l => () =>
       agent(reviewerPrompt(l, pr), {
         label: l.key + '#' + pr.id, phase: 'Breadth',
@@ -229,9 +232,13 @@ const results = await pipeline(
     }).then(d => ({ ...st, clusters: d.clusters }))
   },
   (st, pr) => {
-    const P = profileOf(pr), profile = pr.profile || 'standard'
-    if (!st.clusters.length) return Promise.resolve({ pr: pr.id, profile, quorum: P.skeptics(pr).length, lensVerdicts: st.reviews.map(r => ({ lens: r.lens, verdict: r.verdict })), gaps: st.gaps, clusters: [], skeptics: [] })
-    const SKEPTICS = skepticsFor(pr)
+    const P = profileOf(pr), SKEPTICS = P.skeptics(pr)
+    const base = {
+      pr: pr.id, profile: pr.profile, quorum: SKEPTICS.length,
+      lensVerdicts: st.reviews.map(r => ({ lens: r.lens, verdict: r.verdict })),
+      gaps: st.gaps, clusters: st.clusters,
+    }
+    if (!st.clusters.length) return Promise.resolve({ ...base, skeptics: [] })
     const dockets = chunk(st.clusters, P.docket)
     log(pr.id + ': ' + st.clusters.length + ' clusters -> ' + dockets.length + ' docket(s) per skeptic')
     return parallel(SKEPTICS.map(s => () =>
@@ -244,12 +251,7 @@ const results = await pipeline(
         const ok = parts.filter(Boolean)
         return ok.length ? { skeptic: s.key, dockets_done: ok.length, dockets_total: dockets.length, verdicts: ok.flatMap(p => p.verdicts) } : null
       })
-    )).then(vs => ({
-      pr: pr.id, profile, quorum: SKEPTICS.length,
-      lensVerdicts: st.reviews.map(r => ({ lens: r.lens, verdict: r.verdict })),
-      gaps: st.gaps, clusters: st.clusters,
-      skeptics: vs.filter(Boolean),
-    }))
+    )).then(vs => ({ ...base, skeptics: vs.filter(Boolean) }))
   }
 )
 return results.filter(Boolean)

@@ -4,7 +4,7 @@ Prepares the target if needed — works for OPEN, CLOSED and MERGED PRs alike:
   - fetches refs/pull/<n>/head into the local clone of <repo>  (GitHub keeps this ref after the
     branch is deleted, so closed/merged PRs resolve exactly like open ones)
   - git worktree add --detach RV/<key> <headRefOid>   (re-pointed if it exists at another SHA)
-  - writes sha-<key>, diff-<key>.patch (gh pr diff), body-<key>.md  (refreshed when the head moved)
+  - writes sha-<key>, diff-<key>.patch (gh pr diff; refreshed when the head moved), body-<key>.md (always fresh)
 Then builds packet-<key>.md and upserts the target into args-<batch>.json.
 experiments-<key>.log is still the orchestrator's job (run tests at the head) before the panel runs.
 
@@ -61,28 +61,32 @@ if os.path.isdir(wt):
         subprocess.run(["git", "-C", wt, "checkout", "-q", "--detach", sha], check=True)
 else:
     subprocess.run(["git", "-C", clone, "worktree", "add", "-q", "--detach", wt, sha], check=True)
-# refresh cached diff/body when the head moved, so packet lines match the worktree
+# refresh the cached diff when the head moved, so packet lines match the worktree;
+# the body is always taken from the fresh metadata (descriptions change without commits)
 prev = open(f"{RV}/sha-{k}").read().strip() if os.path.exists(f"{RV}/sha-{k}") else None
 stale = prev is not None and prev != sha
 open(f"{RV}/sha-{k}", "w").write(sha + "\n")
 if stale or not os.path.exists(f"{RV}/diff-{k}.patch"):
     open(f"{RV}/diff-{k}.patch", "w").write(sh("gh", "pr", "diff", str(n), "-R", repo))
-if stale or not os.path.exists(f"{RV}/body-{k}.md"):
-    open(f"{RV}/body-{k}.md", "w").write(meta.get("body") or "")
+body = meta.get("body") or ""
+open(f"{RV}/body-{k}.md", "w").write(body)
 
 # --- packet ------------------------------------------------------------------------------------
-body = open(f"{RV}/body-{k}.md").read()
 # optional "## Known gaps" section in the PR body feeds the KNOWN/ACCEPTED list
-known = body[body.find("## Known gaps"):].split("\nCloses")[0].strip() if "## Known gaps" in body else ""
+# (bounded at the next H2 heading / "Closes" line so later sections aren't suppressed)
+m = re.search(r"^## Known gaps\b.*?(?=^## |^Closes\b|\Z)", body, re.S | re.M)
+known = m.group(0).strip() if m else ""
 out = []; skip = False; dropped = []
 for ln in open(f"{RV}/diff-{k}.patch").read().splitlines():
     if ln.startswith("diff --git"):
-        skip = bool(re.search(r"(package-lock\.json|yarn\.lock|pnpm-lock\.yaml|uv\.lock|poetry\.lock|Cargo\.lock|composer\.lock|Gemfile\.lock)$", ln))
+        skip = bool(re.search(r"/(package-lock\.json|yarn\.lock|pnpm-lock\.yaml|uv\.lock|poetry\.lock|Cargo\.lock|composer\.lock|Gemfile\.lock)$", ln))
         if skip: dropped.append(ln.split(" b/")[-1])
     if not skip: out.append(ln)
 patch = "\n".join(out)
 exp = open(f"{RV}/experiments-{k}.log").read() if os.path.exists(f"{RV}/experiments-{k}.log") else "(none)"
 files = "\n".join(f"- {f['path']} (+{f['additions']}/-{f['deletions']})" for f in meta["files"])
+if meta["changedFiles"] > len(meta["files"]):  # gh caps the files list at 100 entries
+    files += f"\n- … {meta['changedFiles'] - len(meta['files'])} more changed files not listed (gh API cap); see the diff"
 if state == "OPEN":
     state_line = "- state: OPEN"
 else:
@@ -123,7 +127,7 @@ open(f"{RV}/packet-{k}.md", "w").write(packet)
 af = f"{RV}/args-{batch}.json"
 args = json.load(open(af)) if os.path.exists(af) else []
 args = [a for a in args if a["key"] != k] + [{
-    "id": f"{repo.split('/')[1]}#{n}", "key": k, "repo": repo, "pr": n, "state": state,
+    "id": f"{repo.split('/')[1]}#{n}", "key": k, "repo": repo, "pr": n, "state": state, "url": meta["url"],
     "packet": f"{RV}/packet-{k}.md", "checkout": wt, "stack": stack, "alt": alt, "profile": profile}]
 json.dump(args, open(af, "w"), indent=1)
 print(k, f"{repo}#{n}", state, "head", sha[:10], "| packet lines:", packet.count("\n"), "dropped:", dropped,
