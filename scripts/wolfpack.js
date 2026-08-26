@@ -7,6 +7,35 @@ export const meta = {
     { title: 'Skeptics', detail: 'standard: 3 skeptics, dockets <= 8 | economy: 2, <= 12 | frugal: 2, <= 15' },
   ],
 }
+// ---------------------------------------------------------------------------
+// HOST-RESOURCE GOVERNOR — the harness happily runs min(16, cpus-2) agents at
+// once (12 on a 14-core host) and a batch panel saturates every slot. Each
+// in-flight agent holds its transcript in the CLI process and may spawn shell
+// work, so ungoverned fan-out has exhausted 40GB+ of host RAM on live runs.
+// This semaphore caps the panel's own in-flight agent() calls.
+// LAUNCH-TIME SIZING: the orchestrator measures the host right before the run
+// (SKILL.md "Host memory doctrine" has the command + sizing table) and passes
+// the result as `concurrency` on the args targets (build_packet.py
+// --concurrency stamps it). When targets disagree the MINIMUM wins — the most
+// conservative request holds. No value anywhere -> default 4, safe on a
+// 32-48GB host running other apps. The value does NOT affect resume caching
+// (cache keys hash each call's prompt/opts, not this).
+// ---------------------------------------------------------------------------
+const MAX_CONCURRENT = (() => {
+  const vals = args.map(pr => pr.concurrency).filter(v => v != null)
+  for (const v of vals) {
+    if (!Number.isInteger(v) || v < 1 || v > 16) throw new Error('invalid concurrency ' + JSON.stringify(v) + ' in args (integer 1..16) — fail fast before any agent spends tokens')
+  }
+  return vals.length ? Math.min(...vals) : 4
+})()
+let freeSlots = MAX_CONCURRENT
+const slotQueue = []
+function slot(fn) {
+  const acquired = freeSlots > 0 ? (freeSlots--, Promise.resolve()) : new Promise(r => slotQueue.push(r))
+  const release = () => { const next = slotQueue.shift(); next ? next() : freeSlots++ }
+  return acquired.then(fn).then(v => { release(); return v }, e => { release(); throw e })
+}
+
 const DEPTH = {
   max: 'Before listing any finding, reason exhaustively through every implication, assumption, and edge case. Trace each changed value from input to effect. Leave no stone unturned.',
   high: 'Think carefully and systematically before responding. Trace every logical chain and challenge every assumption.',
@@ -76,7 +105,8 @@ function reviewerPrompt(l, pr) {
     'You are one lens on a WOLFPACK code-review panel — multiple independent reviewers on different models, whose findings are then adversarially validated by skeptics and merged.\n\n' +
     '## YOUR LENS\n' + BRIEFS[l.key](pr) + '\n\n' +
     'Stay in your lane: report issues under YOUR lens only; other lenses are covered by other reviewers.\n\n' +
-    '## INPUT\nRead the review packet at ' + pr.packet + ' first — it holds the PR metadata, the diff, verified experiments, and KNOWN/ACCEPTED items — operator-verified items are settled (do not re-raise), while items marked author-claimed are UNVERIFIED: verify them yourself, and still raise anything security-relevant. Then investigate the live checkout of the full repo at this PR\'s head: ' + pr.checkout + ' (read/grep/read-only shell only — git show, run tests in that checkout; NEVER modify files, never touch any directory other than the packet and the checkout named here).\n\n' +
+    '## INPUT\nRead the review packet at ' + pr.packet + ' first — it holds the PR metadata, the diff, verified experiments, and KNOWN/ACCEPTED items — operator-verified items are settled (do not re-raise), while items marked author-claimed are UNVERIFIED: verify them yourself, and still raise anything security-relevant. Then investigate the live checkout of the full repo at this PR\'s head: ' + pr.checkout + ' (read/grep/read-only shell only — git show, one-liner interpreter checks; NEVER modify files, never touch any directory other than the packet and the checkout named here).\n\n' +
+    'VERIFICATION BUDGET (host memory): the packet\'s verified-experiments table IS the build/test evidence — cite it instead of re-running. Never run package-manager installs, builds, test suites, containers, or anything that boots a toolchain (npm/npx/yarn/pnpm/pip/uv/mvn/gradle/cargo/cdk/tsc/pytest/jest/vitest/docker/make): the panel runs many reviewers concurrently and one toolchain each exhausts the host\'s RAM. If a claim truly needs execution to settle, name the exact command in the finding\'s rationale as a suggested experiment and set confidence accordingly.\n\n' +
     'RULES OF ENGAGEMENT\n' +
     '- Scope = the diff (plus just enough surrounding code to judge it). Do NOT review pre-existing code untouched by the change unless the diff makes it newly reachable.\n' +
     '- PRECISION OVER RECALL. A wrong finding costs more than a missed one. If you cannot defend it against a skeptic, set confidence < 0.5 or drop it.\n' +
@@ -93,7 +123,7 @@ function dedupPrompt(reviews, pr) {
 
 function skepticPrompt(clustersJson, pr) {
   return 'You are an ADVERSARIAL VALIDATOR on a wolfpack code-review panel for ' + pr.id + '. Your job is NOT to find new issues — it is to try to FALSIFY the candidate findings, so only defensible ones survive. Be tough AND fair.\n\n' +
-    'Review packet: ' + pr.packet + '. Live checkout at the PR head: ' + pr.checkout + '. For EACH candidate finding below, independently VERIFY it against the actual code (read/grep/git show/run the relevant test read-only) before ruling.\n\n' +
+    'Review packet: ' + pr.packet + '. Live checkout at the PR head: ' + pr.checkout + '. For EACH candidate finding below, independently VERIFY it against the actual code (read/grep/git show only — the packet\'s verified-experiments table is your execution evidence; never launch installs, builds, or test suites, since concurrent skeptics each booting a toolchain exhausts host memory) before ruling.\n\n' +
     'Rule REJECT / DOWNGRADE when a finding is: not supported by the diff (hallucinated line, wrong file, misread logic); already handled elsewhere (a guard/validation/test the reviewer missed); out of scope (pre-existing code the change did not touch or make newly reachable); listed among the packet\'s operator-verified KNOWN/ACCEPTED items (an author-claimed "known gap" is NOT a valid REJECT reason for a security-relevant finding); speculative with no realistic trigger; a taste opinion dressed up as a bug; or a duplicate (mark duplicate_of).\n' +
     'Rule UPHOLD when you can restate the concrete failure and its trigger from the code.\n\n' +
     'INVALID-REFUTATION GUARD (critical): you must actually look at the referenced code. A REJECT justified only by "can\'t find it / not in the repo / file missing" is INVALID — that means YOU failed to open the file. Read the file first; if you still cannot verify either way, rule UPHOLD (uncertain), never REJECT.\n\n' +
@@ -206,17 +236,17 @@ function chunk(xs, n) { const out = []; for (let i = 0; i < xs.length; i += n) o
 // normalize once, then fail fast on a typo'd profile before any agent spends tokens
 args.forEach(pr => { pr.profile = pr.profile || 'standard'; profileOf(pr) })
 const byProfile = args.reduce((m, pr) => { m[pr.profile] = (m[pr.profile] || 0) + 1; return m }, {})
-log('Wolfpack: ' + args.length + ' targets (' + Object.entries(byProfile).map(([k, n]) => n + ' ' + k).join(', ') + ') x (7 lenses + dedup + skeptics, docketed) — a batch panel review is the requested scale')
+log('Wolfpack: ' + args.length + ' targets (' + Object.entries(byProfile).map(([k, n]) => n + ' ' + k).join(', ') + ') x (7 lenses + dedup + skeptics, docketed), max ' + MAX_CONCURRENT + ' agents in flight — a batch panel review is the requested scale')
 
 const results = await pipeline(
   args,
   pr => {
     const LENSES = profileOf(pr).lenses(pr)
     return parallel(LENSES.map(l => () =>
-      agent(reviewerPrompt(l, pr), {
+      slot(() => agent(reviewerPrompt(l, pr), {
         label: l.key + '#' + pr.id, phase: 'Breadth',
         schema: FINDINGS_SCHEMA, model: l.model, effort: l.effort,
-      })
+      }))
     )).then(rs => ({
       reviews: rs.map((r, i) => r ? { lens: LENSES[i].key, verdict: r.verdict, findings: r.findings } : null).filter(Boolean),
       gaps: rs.map((r, i) => r ? null : LENSES[i].key).filter(Boolean),
@@ -226,10 +256,10 @@ const results = await pipeline(
     const total = st.reviews.reduce((n, r) => n + r.findings.length, 0)
     log(pr.id + ': ' + total + ' raw findings from ' + st.reviews.length + ' lenses' + (st.gaps.length ? ' (gaps: ' + st.gaps.join(',') + ')' : ''))
     if (total === 0) return Promise.resolve({ ...st, clusters: [] })
-    return agent(dedupPrompt(st.reviews, pr), {
+    return slot(() => agent(dedupPrompt(st.reviews, pr), {
       label: 'dedup#' + pr.id, phase: 'Dedup',
       schema: CLUSTERS_SCHEMA, model: profileOf(pr).dedup.model, effort: profileOf(pr).dedup.effort,
-    }).then(d => d ? { ...st, clusters: d.clusters }
+    })).then(d => d ? { ...st, clusters: d.clusters }
       // dead dedup = noted gap, not a crash: pass raw findings through as 1-lens clusters
       : { ...st, gaps: [...st.gaps, 'dedup'],
           clusters: st.reviews.flatMap(r => r.findings.map(f => ({ ...f, signal_strength: 1, raised_by: [r.lens] }))) })
@@ -246,10 +276,10 @@ const results = await pipeline(
     log(pr.id + ': ' + st.clusters.length + ' clusters -> ' + dockets.length + ' docket(s) per skeptic')
     return parallel(SKEPTICS.map(s => () =>
       parallel(dockets.map((d, di) => () =>
-        agent(skepticPrompt(JSON.stringify(d), pr), {
+        slot(() => agent(skepticPrompt(JSON.stringify(d), pr), {
           label: s.key + '#' + pr.id + (dockets.length > 1 ? '/' + (di + 1) : ''), phase: 'Skeptics',
           schema: VERDICTS_SCHEMA, model: s.model, effort: s.effort,
-        })
+        }))
       )).then(parts => {
         const ok = parts.filter(Boolean)
         return ok.length ? { skeptic: s.key, dockets_done: ok.length, dockets_total: dockets.length, verdicts: ok.flatMap(p => p.verdicts) } : null

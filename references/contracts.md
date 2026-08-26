@@ -75,8 +75,17 @@ covered by other reviewers, so don't dilute your signal by straying.
 
 ## INPUT
 Read the review packet at <packet path>, then investigate the live checkout at
-<worktree path> (read/grep/read-only shell only — git show, run tests in a
-scratch venv; NEVER modify files or run mutating/network-write commands).
+<worktree path> (read/grep/read-only shell only — git show, one-liner
+interpreter checks; NEVER modify files or run mutating/network-write commands).
+
+VERIFICATION BUDGET (host memory): the packet's verified-experiments table IS
+the build/test evidence — cite it instead of re-running. Never run
+package-manager installs, builds, test suites, containers, or anything that
+boots a toolchain (npm/npx/yarn/pnpm/pip/uv/mvn/gradle/cargo/cdk/tsc/pytest/
+jest/vitest/docker/make): the panel runs many reviewers concurrently and one
+toolchain each exhausts the host's RAM. If a claim truly needs execution to
+settle, name the exact command in the finding's rationale as a suggested
+experiment and set confidence accordingly.
 
 RULES OF ENGAGEMENT
 - Scope = the diff (and just enough surrounding code to judge it). Do NOT
@@ -149,7 +158,9 @@ tough AND fair.
 
 Review packet: <packet path>. Live checkout: <worktree path>. For EACH candidate
 finding below, independently VERIFY it against the actual code (read/grep/
-git show/run the relevant test) before ruling.
+git show only — the packet's verified-experiments table is your execution
+evidence; never launch installs, builds, or test suites, since concurrent
+skeptics each booting a toolchain exhausts host memory) before ruling.
 
 Rule REJECT / DOWNGRADE when a finding is:
 - Not supported by the diff (hallucinated line, wrong file, misread logic).
@@ -262,7 +273,10 @@ in `scripts/wolfpack.js`) — but the Stage-4 tooling (`wolftools.py`) also need
 ```js
 args = [{ id: 'myrepo#58', key: 'pr58', repo: 'my-org/myrepo', pr: 58,
           packet: '/abs/packet-pr58.md', checkout: '/abs/wolf/pr58',
-          stack: 'Python/FastAPI/...', alt: false, profile: 'standard' }, ...]
+          stack: 'Python/FastAPI/...', alt: false, profile: 'standard',
+          concurrency: 4 }, ...]  // concurrency: optional launch-time cap —
+                                  // min across targets wins; default 4
+
 ```
 
 ```js
@@ -270,6 +284,27 @@ export const meta = {
   name: 'wolfpack-pr-review',
   description: 'Wolfpack panel review (Claude-only): breadth lenses -> dedup -> adversarial skeptics',
   phases: [{ title: 'Breadth' }, { title: 'Dedup' }, { title: 'Precision' }],
+}
+
+// HOST-RESOURCE GOVERNOR — the harness runs min(16, cpus-2) agents at once and
+// a panel saturates it; cap the panel's own in-flight agent() calls instead.
+// Launch-time sizing: targets carry `concurrency` (stamped by build_packet.py
+// --concurrency; sizing table in SKILL.md "Host memory doctrine"); MIN across
+// targets wins, default 4 when absent. Never affects resume caching. Wrap
+// EVERY agent() call site in slot(() => ...).
+const MAX_CONCURRENT = (() => {
+  const vals = args.map(pr => pr.concurrency).filter(v => v != null)
+  for (const v of vals) {
+    if (!Number.isInteger(v) || v < 1 || v > 16) throw new Error('invalid concurrency ' + JSON.stringify(v) + ' in args (integer 1..16)')
+  }
+  return vals.length ? Math.min(...vals) : 4
+})()
+let freeSlots = MAX_CONCURRENT
+const slotQueue = []
+function slot(fn) {
+  const acquired = freeSlots > 0 ? (freeSlots--, Promise.resolve()) : new Promise(r => slotQueue.push(r))
+  const release = () => { const next = slotQueue.shift(); next ? next() : freeSlots++ }
+  return acquired.then(fn).then(v => { release(); return v }, e => { release(); throw e })
 }
 
 const LENSES = [
