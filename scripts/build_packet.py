@@ -1,4 +1,4 @@
-"""python3 build_packet.py [--profile standard|economy|frugal] <batch> <key> <repo> <pr> <alt:0|1> <stack...>
+"""python3 build_packet.py [--profile standard|economy|frugal] [--concurrency N] <batch> <key> <repo> <pr> <alt:0|1> <stack...>
 
 Prepares the target if needed — works for OPEN, CLOSED and MERGED PRs alike:
   - fetches refs/pull/<n>/head into the local clone of <repo>  (GitHub keeps this ref after the
@@ -51,6 +51,21 @@ def main():
         profile = argv[i + 1]; del argv[i:i + 2]
     if profile not in ("standard", "economy", "frugal"):
         sys.exit(f"unknown profile {profile!r} (standard|economy|frugal)")
+    # launch-time panel sizing: the orchestrator measures host memory pressure
+    # (SKILL.md "Host memory doctrine") and stamps the result on this target;
+    # the workflow script takes the MIN across targets, default 4 when absent
+    concurrency = None
+    if "--concurrency" in argv:
+        i = argv.index("--concurrency")
+        if i + 1 >= len(argv):
+            sys.exit(__doc__)
+        try:
+            concurrency = int(argv[i + 1])
+        except ValueError:
+            sys.exit(f"--concurrency must be an integer 1..16, got {argv[i + 1]!r}")
+        del argv[i:i + 2]
+        if not 1 <= concurrency <= 16:
+            sys.exit(f"--concurrency must be 1..16, got {concurrency}")
     if len(argv) < 5:
         sys.exit(__doc__)
     batch, k, repo, n, alt = argv[0], argv[1], argv[2], int(argv[3]), argv[4] == "1"
@@ -147,10 +162,11 @@ def main():
     args = json.load(open(af)) if os.path.exists(af) else []
     args = [a for a in args if a["key"] != k] + [{
         "id": f"{repo.split('/')[1]}#{n}", "key": k, "repo": repo, "pr": n, "state": state, "url": meta["url"],
-        "packet": f"{RV}/packet-{k}.md", "checkout": wt, "stack": stack, "alt": alt, "profile": profile}]
+        "packet": f"{RV}/packet-{k}.md", "checkout": wt, "stack": stack, "alt": alt, "profile": profile,
+        **({"concurrency": concurrency} if concurrency else {})}]
     json.dump(args, open(af, "w"), indent=1)
     print(k, f"{repo}#{n}", state, "head", sha[:10], "| packet lines:", packet.count("\n"), "dropped:", dropped,
-          "| profile", profile, "| batch", batch, "targets:", len(args))
+          "| profile", profile, ("| concurrency %d " % concurrency if concurrency else "") + "| batch", batch, "targets:", len(args))
 
 
 if __name__ == "__main__":

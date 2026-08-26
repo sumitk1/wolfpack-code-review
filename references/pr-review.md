@@ -29,9 +29,11 @@ profiles; for a full panel, push the `correctness-b` / `security-b` entries
 
 ## Reviewer content
 Point each reviewer at the packet path + the worktree path. They may read/grep
-and run shell to verify (`git show`, run the package's tests) — noting that
-running tests executes the PR's code; see SKILL.md's Tuning caveat for
-untrusted authors.
+and run cheap read-only shell (`git show`, one-liner interpreter checks) but
+never launch installs, builds, or test suites — the packet's verified
+experiments are the execution evidence (SKILL.md Host memory doctrine).
+Builds/tests run once, at packet build; that step executes the PR's code, so
+see SKILL.md's Tuning caveat for untrusted authors.
 
 ## Output format → `<scratchpad>/wolf/out/review-<pr>.md`
 ```markdown

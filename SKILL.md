@@ -123,6 +123,39 @@ on a 10+-finding docket can run 20–40 min. That is grinding, not hanging.
   prompts byte-for-byte — and watch the first minute for unexpected live
   Breadth agents.
 
+## Host memory doctrine (learned from a 40GB live blow-up)
+
+The harness runs up to `min(16, cpus-2)` agents at once and a batch panel
+saturates every slot. Two multipliers turned that into macOS "your system has
+run out of application memory" on a 48GB host: each in-flight agent's
+transcript lives in the CLI process, and reviewers who were told to "run the
+tests" each booted their own toolchain (`npm ci`, `tsc`, `cdk synth`, jest,
+pytest — 1-3GB apiece, ×12 concurrent).
+
+- **Builds and test suites run exactly once — by the orchestrator at packet
+  build (Playbook §3).** Reviewer and skeptic prompts forbid toolchain
+  launches (installs, builds, test suites, containers); the packet's verified
+  experiments ARE the execution evidence, and a reviewer who needs a new
+  experiment names the command in the finding instead of running it.
+- **Size the panel's concurrency at launch.** A semaphore in
+  `scripts/wolfpack.js` gates the panel's own in-flight `agent()` calls below
+  the harness cap, reading `concurrency` from the args targets — MIN across
+  targets wins, absent → default 4. The Workflow sandbox cannot measure the
+  host itself, so the orchestrator does it right before building packets and
+  stamps the value via `build_packet.py --concurrency N`. Sizing: check
+  `memory_pressure -Q` (macOS; Linux: `free -m`) — free < 25% or other
+  memory-heavy apps open → 2 · free 25–50% → 4 · free > 50% on an idle
+  host → 6–8. The value never invalidates resume caching (cache keys hash
+  prompts/opts). `node tests/test_concurrency.mjs` verifies the gate.
+- **Run big batches in a fresh session, and let it end.** Every completed
+  agent's transcript and cached result is retained in the CLI process for
+  resume — an all-day session that has run many panels holds all of them
+  (observed: 21 workflows / 865 agents in one session, heap ratcheting all
+  day). Reports and `args-*.json` live on disk; nothing is lost by exiting.
+- The terminal app itself accumulates the progress-tree redraws of a
+  100+-agent run in scrollback; cap scrollback lines if the terminal's own
+  footprint keeps growing across long runs.
+
 Multiple targets (e.g. several PRs) go through **one** Workflow run,
 `pipeline()`d so each target's stages proceed independently — never one workflow
 per target. Note the session's workflow-size guideline in the run log when the
@@ -142,13 +175,15 @@ Prefer one or two targets per workflow so an interrupt is cheap.
    `POST …/pulls/<N>/reviews` (event `COMMENT`) still posts. Put the PR state
    in the packet metadata with a note that recommendations must be phrased as
    follow-up changes against the base branch — there is no branch to push
-   fixes to. (`scripts/build_packet.py` does all of this.)
+   fixes to. (`scripts/build_packet.py` does all of this; measure free memory
+   first and pass `--concurrency N` per the Host memory doctrine sizing table.)
 3. **Build the shared review packet** (one file all reviewers read): target
    metadata, the full diff in a ```diff fence (exclude generated giants —
    lockfiles, generated schemas — with a note naming them), **verified
    experiments** (run the tests/build NOW at the head SHA — sandboxed if the
    author is untrusted, since building/testing a PR executes its code; a verified
-   "bad input → bad output" table beats speculation), and a **known/accepted
+   "bad input → bad output" table beats speculation — this is the ONLY stage
+   where builds/tests run, see Host memory doctrine), and a **known/accepted
    items** list (already-filed issues, deliberate scope cuts) so the panel
    doesn't re-raise them as discoveries.
 4. **Run the Workflow** — breadth barrier → dedup agent → skeptic barrier, per
@@ -182,14 +217,15 @@ Prefer one or two targets per workflow so an interrupt is cheap.
 - Change lenses/tiers/efforts by editing the tables in `references/contracts.md`
   — it is the single source of truth for the panel.
 - Cost scales with elite/max lenses; `sonnet`/`haiku` lenses are the cheap ones.
-- Reviewers and skeptics are **read-only by instruction**: they may read/grep/
-  run shell to verify (`git show`, builds, tests in a scratch venv) but never
-  modify files. Caveat: that constrains the agents' own tool calls, NOT code the
-  PR's build/tests execute — running an untrusted PR's tests is arbitrary code
-  execution with your ambient credentials, and `build_packet.py` worktrees share
-  `.git` (hooks/config) with your clone. Sandbox or skip test-runs for untrusted
-  authors. Fixes are a separate step by the main agent after the human picks
-  findings.
+- Reviewers and skeptics are **read-only and toolchain-free by instruction**:
+  they may read/grep and run cheap read-only shell (`git show`, one-liner
+  interpreter checks) but never modify files and never launch installs, builds,
+  test suites, or containers — see Host memory doctrine. Builds/tests happen
+  once, at packet build. Caveat on that packet step: running an untrusted PR's
+  tests is arbitrary code execution with your ambient credentials, and
+  `build_packet.py` worktrees share `.git` (hooks/config) with your clone —
+  sandbox or skip test-runs for untrusted authors. Fixes are a separate step by
+  the main agent after the human picks findings.
 
 ## Files
 
@@ -203,7 +239,8 @@ Prefer one or two targets per workflow so an interrupt is cheap.
   (standard | economy | frugal), `alt` model swap, skeptic dockets; targets via `args`.
 - `scripts/build_packet.py` — per-target prep + packet: pull-ref fetch (open,
   closed and merged PRs), detached worktree, diff/body, known-items list,
-  `--profile`, upserts `args-<batch>.json`. Edit `CLONES`/`GLOBAL_KNOWN` per
+  `--profile`, `--concurrency` (launch-time panel sizing), upserts
+  `args-<batch>.json`. Edit `CLONES`/`GLOBAL_KNOWN` per
   repo, or set `WOLF_CLONE=<path>` to point at a clone without editing.
 - `scripts/wolftools.py` — `split` a workflow output into per-target findings,
   `table`, `report` (profile/quorum-aware footer), `post` (COMMENT review).
